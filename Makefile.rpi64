@@ -1,0 +1,7 @@
+#OPTS = -DOPUS -DALAC -DRESAMPLE -DVISEXPORT -DDSD -DIR -DGPIO -DRPI -DUSE_SSL -DLINKALL -I./include -I./include/opus -I./include/alac -I/usr/local/include -s -march=armv8-a+crc
+
+OPTS = -DFFMPEG -DRESAMPLE -DVISEXPORT -DDSD -DIR -DHDMICEC -DUSE_SSL -DLINKALL -I./include -I/usr/local/include -I/opt/libcec6/include -s
+
+LDFLAGS=-L./lib -L/usr/local/lib -L/opt/libcec6/lib/$(shell uname -m)-linux-gnu -s -lgomp
+
+include Makefile

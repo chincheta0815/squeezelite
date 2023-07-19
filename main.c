@@ -91,11 +91,14 @@ static void usage(const char *argv0) {
 #else
 		   "  -d <log>=<level>\tSet logging level, logs: all|slimproto|stream|decode|output|ir, level: info|debug|sdebug\n"
 #endif
-#if defined(GPIO) && defined(RPI)
-		   "  -G <Rpi GPIO#>:<H/L>\tSpecify the BCM GPIO# to use for Amp Power Relay and if the output should be Active High or Low\n"
-#endif
 		   "  -e <codec1>,<codec2>\tExplicitly exclude native support of one or more codecs; known codecs: " CODECS "\n"
 		   "  -f <logfile>\t\tWrite debug to logfile\n"
+#if defined(GPIO) && defined(RPI)
+                   "  -G <Rpi GPIO#>:<H/L>\tSpecify the BCM GPIO# to use for Amp Power Relay and if the output should be Active High or Low\n"
+#endif
+#if HDMICEC
+                   "  -H preamp:<switch>\t\tEnable HDMI CEC for steering an CEC capable amplifier; switch = 'enable'|'disable'\n"
+#endif
 #if IR
 		   "  -i [<filename>]\tEnable lirc remote control support (lirc config file ~/.lircrc used if filename not specified)\n"
 #endif
@@ -212,6 +215,9 @@ static void usage(const char *argv0) {
 #if IR
 		   " IR"
 #endif
+#if HDMICEC
+		   " HDMICEC"
+#endif
 #if GPIO
 		   " GPIO"
 #endif
@@ -300,6 +306,7 @@ int main(int argc, char **argv) {
 	char *name = NULL;
 	char *namefile = NULL;
 	char *modelname = NULL;
+	u8_t modeldeviceid = 12;
 	extern bool pcm_check_header;
 	extern bool user_rates;
 	char *logfile = NULL;
@@ -333,6 +340,13 @@ int main(int argc, char **argv) {
 #if IR
 	char *lircrc = NULL;
 #endif
+#if HDMICEC
+	/* 
+	 * global struct needed in other parts.
+	 * declared in squeezelite.h
+	 */
+	cec_opts.enabled = false;
+#endif
 	
 	log_level log_output = lWARN;
 	log_level log_stream = lWARN;
@@ -340,6 +354,9 @@ int main(int argc, char **argv) {
 	log_level log_slimproto = lWARN;
 #if IR
 	log_level log_ir     = lWARN;
+#endif
+#if HDMICEC
+	log_level log_cec    = lWARN;
 #endif
 
 	int maxSampleRate = 0;
@@ -360,16 +377,19 @@ int main(int argc, char **argv) {
 
 	while (optind < argc && strlen(argv[optind]) >= 2 && argv[optind][0] == '-') {
 		char *opt = argv[optind] + 1;
-		if (strstr("oabcCdefmMnNpPrsZ"
+		if (strstr("oabcCdefmMnNpPrsZk"
 #if ALSA
 				   "UVO"
 #endif
 				   , opt) && optind < argc - 1) {
 			optarg = argv[optind + 1];
 			optind += 2;
-		} else if (strstr("ltz?W"
+		} else if (strstr("ltz?WH"
 #if ALSA
 						  "LX"
+#endif
+#if HDMICEC
+ 						  "H"
 #endif
 #if RESAMPLE
 						  "uR"
@@ -389,7 +409,6 @@ int main(int argc, char **argv) {
 #if GPIO
 						  "S"
 #endif
-
 						  , opt)) {
 			optarg = NULL;
 			optind += 1;
@@ -417,6 +436,12 @@ int main(int argc, char **argv) {
 				if (o) output_buf_size = atoi(o) * 1024;
 			}
 			break;
+#if HDMICEC
+		case 'H':
+			cec_opts.enabled = true;
+			modeldeviceid = 42;
+			break;
+#endif
 		case 'c':
 			include_codecs = optarg;
 			break;
@@ -443,6 +468,9 @@ int main(int argc, char **argv) {
 					if (!strcmp(l, "all") || !strcmp(l, "output"))    log_output = new;
 #if IR
 					if (!strcmp(l, "all") || !strcmp(l, "ir"))        log_ir     = new;
+#endif
+#if HDMICEC
+					if (!strcmp(l, "all") || !strcmp(l, "cec"))       log_cec    = new;
 #endif
 				} else {
 					fprintf(stderr, "\nDebug settings error: -d %s\n\n", optarg);
@@ -808,12 +836,18 @@ int main(int argc, char **argv) {
 	}
 #endif
 
+#if HDMICEC
+        if (cec_opts.enabled) {
+                cec_init(log_cec);
+        }
+#endif
+
 	if (name && namefile) {
 		fprintf(stderr, "-n and -N option should not be used at same time\n");
 		exit(1);
 	}
 
-	slimproto(log_slimproto, server, mac, name, namefile, modelname, maxSampleRate);
+	slimproto(log_slimproto, server, mac, name, namefile, modelname, modeldeviceid, maxSampleRate);
 
 	decode_close();
 	stream_close();
@@ -831,6 +865,10 @@ int main(int argc, char **argv) {
 		output_close_pulse();
 #endif
 	}
+
+#if HDMICEC
+		cec_close();
+#endif
 
 #if IR
 	ir_close();

@@ -1,8 +1,8 @@
-#Cross compile support - create a Makefile which defines these three variables and then includes this Makefile...
+
 CFLAGS	?= -Wall -fPIC -O2
 CFLAGS	+= -fcommon
 LDADD	?= -lpthread -lm -lrt
-EXECUTABLE ?= squeezelite
+EXECUTABLE ?= squeezelite-cec
 
 # passing one or more of these in $(OPTS) enables optional feature inclusion
 OPT_DSD        = -DDSD
@@ -14,6 +14,7 @@ OPT_VIS        = -DVISEXPORT
 OPT_IR         = -DIR
 OPT_GPIO       = -DGPIO
 OPT_RPI        = -DRPI
+OPT_HDMICEC    = -DHDMICEC
 OPT_NO_FAAD    = -DNO_FAAD
 OPT_NO_MAD     = -DNO_MAD
 OPT_NO_MPG123  = -DNO_MPG123
@@ -36,6 +37,7 @@ SOURCES_VIS      = output_vis.c
 SOURCES_IR       = ir.c
 SOURCES_GPIO     = gpio.c
 SOURCES_RPI      = minimal_gpio.c
+SOURCES_HDMICEC  = cec.c
 SOURCES_FAAD     = faad.c
 SOURCES_SSL      = sslsym.c
 SOURCES_OPUS     = opus.c
@@ -57,6 +59,7 @@ LINKALL_FAAD     = -lfaad
 LINKALL_OPUS     = -lopusfile -lopus
 LINKALL_MAD      = -lmad
 LINKALL_MPG123   = -lmpg123
+LINKALL_HDMICEC	 = -lcec
 
 DEPS             = squeezelite.h slimproto.h
 
@@ -84,6 +87,9 @@ ifneq (,$(findstring $(OPT_VIS), $(OPTS)))
 endif
 ifneq (,$(findstring $(OPT_IR), $(OPTS)))
 	SOURCES += $(SOURCES_IR)
+endif
+ifneq (,$(findstring $(OPT_HDMICEC), $(OPTS)))
+        SOURCES += $(SOURCES_HDMICEC)
 endif
 ifneq (,$(findstring $(OPT_GPIO), $(OPTS)))
 	SOURCES += $(SOURCES_GPIO)
@@ -125,6 +131,12 @@ ifneq (,$(findstring $(OPT_RESAMPLE), $(OPTS)))
 endif
 ifneq (,$(findstring $(OPT_IR), $(OPTS)))
 	LDADD += $(LINKALL_IR)
+endif
+ifneq (,$(findstring $(OPT_HDMICEC), $(OPTS)))
+        LDADD += $(LINKALL_HDMICEC)
+ifeq ($(UNAME), Linux)
+	LDADD += $(LINK_LINUX)
+endif
 endif
 ifeq (,$(findstring $(OPT_NO_FAAD), $(OPTS)))
 	LDADD += $(LINKALL_FAAD)

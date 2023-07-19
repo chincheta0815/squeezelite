@@ -1,4 +1,4 @@
-/* 
+/*
  *  Squeezelite - lightweight headless squeezebox emulator
  *
  *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
@@ -42,6 +42,11 @@
 #define QUOTE(name) #name
 #define STR(macro)  QUOTE(macro)
 #define MODEL_NAME_STRING STR(MODEL_NAME)
+
+#if !defined(MODEL_DEVICEID)
+#define MODEL_DEVICEID 12
+#endif
+#define MODEL_DEVICEID_STRING STR(MODEL_DEVICEID)
 
 // build detection
 #if defined(linux)
@@ -154,6 +159,13 @@
 #define IR 0
 #endif
 
+#if LINUX && defined(HDMICEC)
+#undef HDMICEC
+#define HDMICEC 1
+#else
+#define HDMICEC 0
+#endif
+
 #if defined(DSD)
 #undef DSD
 #define DSD       1
@@ -204,6 +216,7 @@
 #define LIBAVFORMAT "libavformat.so.%d"
 #define LIBSOXR "libsoxr.so.0"
 #define LIBLIRC "liblirc_client.so.0"
+#define LIBCEC "libcec.so.%d"
 #endif
 
 #if OSX
@@ -288,6 +301,9 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <signal.h>
+#if HDMICEC
+#include <math.h>
+#endif
 #if SUN
 #include <ctype.h>
 #include <sys/types.h>
@@ -297,6 +313,9 @@
 #define DECODE_THREAD_STACK_SIZE 128 * 1024
 #define OUTPUT_THREAD_STACK_SIZE  64 * 1024
 #define IR_THREAD_STACK_SIZE      64 * 1024
+#if HDMICEC
+#define CEC_THREAD_STACK_SIZE	  64 * 1024
+#endif
 #if !OSX
 #define thread_t pthread_t;
 #endif
@@ -521,7 +540,7 @@ void buf_init(struct buffer *buf, size_t size);
 void buf_destroy(struct buffer *buf);
 
 // slimproto.c
-void slimproto(log_level level, char *server, u8_t mac[6], const char *name, const char *namefile, const char *modelname, int maxSampleRate);
+void slimproto(log_level level, char *server, u8_t mac[6], const char *name, const char *namefile, const char *modelname, u8_t deviceid, int maxSampleRate);
 void slimproto_stop(void);
 void wake_controller(void);
 
@@ -800,6 +819,38 @@ struct irstate {
 
 void ir_init(log_level level, char *lircrc);
 void ir_close(void);
+#endif
+
+// cec.c
+#if HDMICEC
+typedef enum {
+	SOFT_MUTE, REAL_MUTE
+} cec_mute_mode_t;
+
+struct cec_opts_s {
+	bool enabled;
+};
+
+struct sqcli_s {
+	int socket;
+	in_addr_t server_ip;
+	char client_id[18];
+	mutex_type mutex;
+	u32_t timeout;
+};
+
+typedef enum {
+        SQ_NONE, SQ_ONOFF, SQ_ON, SQ_OFF,
+	SQ_CONNECT, SQ_PAUSE, SQ_UNPAUSE, SQ_STOP,
+	SQ_MUTE_TOGGLE, SQ_MUTE, SQ_UNMUTE, SQ_VOLUME,
+	SQ_FADE
+} sq_event_t;
+
+struct cec_opts_s cec_opts;
+
+void cec_init(log_level level);
+int sq_callback(sq_event_t event, ...);
+void cec_close(void);
 #endif
 
 // sslsym.c

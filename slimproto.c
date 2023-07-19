@@ -55,6 +55,9 @@ extern struct codec *codecs[];
 #if IR
 extern struct irstate ir;
 #endif
+#if HDMICEC
+extern struct sqcli_s sq;
+#endif
 
 event_event wake_e;
 
@@ -68,7 +71,10 @@ event_event wake_e;
 #define LOCK_I   mutex_lock(ir.mutex)
 #define UNLOCK_I mutex_unlock(ir.mutex)
 #endif
-
+#if HDMICEC
+#define LOCK_SQ mutex_lock(sq.mutex)
+#define UNLOCK_SQ mutex_unlock(sq.mutex)
+#endif
 static struct {
 	u32_t updated;
 	u32_t stream_start;
@@ -119,8 +125,8 @@ void send_packet(u8_t *packet, size_t len) {
 	}
 }
 
-static void sendHELO(bool reconnect, const char *fixed_cap, const char *var_cap, u8_t mac[6]) {
-	#define BASE_CAP "Model=squeezelite,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=" VERSION
+static void sendHELO(bool reconnect, const char *fixed_cap, const char *var_cap, u8_t deviceid, u8_t mac[6]) {
+	#define BASE_CAP "Model=squeezecec,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Balance=1,Firmware=" VERSION
 	#define SSL_CAP "CanHTTPS=1"
 	const char *base_cap;
 	struct HELO_packet pkt;
@@ -138,7 +144,7 @@ static void sendHELO(bool reconnect, const char *fixed_cap, const char *var_cap,
 	memset(&pkt, 0, sizeof(pkt));
 	memcpy(&pkt.opcode, "HELO", 4);
 	pkt.length = htonl(sizeof(struct HELO_packet) - 8 + strlen(base_cap) + strlen(fixed_cap) + strlen(var_cap));
-	pkt.deviceid = 12; // squeezeplay
+	pkt.deviceid = deviceid; 
 	pkt.revision = 0;
 	packn(&pkt.wlan_channellist, reconnect ? 0x4000 : 0x0000);
 	packN(&pkt.bytes_received_H, (u64_t)status.stream_bytes >> 32);
@@ -146,7 +152,7 @@ static void sendHELO(bool reconnect, const char *fixed_cap, const char *var_cap,
 	memcpy(pkt.mac, mac, 6);
 
 	LOG_INFO("mac: %02x:%02x:%02x:%02x:%02x:%02x", pkt.mac[0], pkt.mac[1], pkt.mac[2], pkt.mac[3], pkt.mac[4], pkt.mac[5]);
-
+	LOG_INFO("deviceid: %d", pkt.deviceid);
 	LOG_INFO("cap: %s%s%s", base_cap, fixed_cap, var_cap);
 
 	send_packet((u8_t *)&pkt, sizeof(pkt));
@@ -370,6 +376,9 @@ static void process_strm(u8_t *pkt, int len) {
 				stream_file(header, header_len, strm->threshold * 1024);
 				autostart -= 2;
 			} else {
+#if HDMICEC
+				sq_callback(SQ_CONNECT);
+#endif
 				stream_sock(ip, port, strm->flags & 0x20, header, header_len, strm->threshold * 1024, autostart >= 2);
 			}
 			sendSTAT("STMc", 0);
@@ -429,6 +438,9 @@ static void process_aude(u8_t *pkt, int len) {
 		output.state = OUTPUT_STOPPED;
 		output.stop_time = gettime_ms();
 	}
+#if HDMICEC
+	sq_callback(SQ_ONOFF, ((aude->enable_spdif) ? true : false));
+#endif
 	UNLOCK_O;
 }
 
@@ -439,8 +451,48 @@ static void process_audg(u8_t *pkt, int len) {
 
 	LOG_DEBUG("audg gainL: %u gainR: %u adjust: %u", audg->gainL, audg->gainR, audg->adjust);
 
+#if HDMICEC
+	float preamp_gain = -1. * (255 - audg->preamp) / 2;
+
+	if (cec_opts.enabled) {
+		sq_callback(SQ_VOLUME, audg->gainL, audg->gainR);
+
+		if (preamp_gain >= -30. && preamp_gain <= 0.) {
+			audg->gainL = audg->gainR = (unsigned)(pow(10, preamp_gain / 20) * (1 << 8) + .5) * (1 << 8);
+		}
+		else {
+			audg->gainL = audg->gainR = (unsigned)((pow(10, preamp_gain / 20) * (1 << 16)) + .5);
+		}
+
+		LOG_DEBUG("fixed audg gainL: %u gainR: %u adjust: %u", audg->gainL, audg->gainR, audg->adjust);
+	}
+
+#endif
 	set_volume(audg->adjust ? audg->gainL : FIXED_ONE, audg->adjust ? audg->gainR : FIXED_ONE);
+
 }
+
+#if HDMICEC
+static void process_audm(u8_t *pkt, int len) {
+	struct audm_packet *audm = (struct audm_packet *)pkt;
+
+	LOG_DEBUG("audm state: %d", audm->state);
+
+	bool mutestate = (audm->state) ? true : false;
+
+	sq_callback(SQ_MUTE_TOGGLE, mutestate);
+}
+
+static void process_audf(u8_t *pkt, int len) {
+	struct audf_packet *audf = (struct audf_packet *)pkt;
+
+	LOG_DEBUG("audf active: %d", audf->active);
+
+	bool fade_active = (audf->active) ? true : false;
+
+	sq_callback(SQ_FADE, fade_active);
+}
+#endif
 
 static void process_setd(u8_t *pkt, int len) {
 	struct setd_packet *setd = (struct setd_packet *)pkt;
@@ -515,6 +567,10 @@ static struct handler handlers[] = {
 	{ "codc", process_codc },
 	{ "aude", process_aude },
 	{ "audg", process_audg },
+#if HDMICEC
+	{ "audm", process_audm },
+	{ "audf", process_audf },
+#endif
 	{ "setd", process_setd },
 	{ "serv", process_serv },
 	{ "",     NULL  },
@@ -820,7 +876,7 @@ in_addr_t discover_server(char *default_server) {
 #define FIXED_CAP_LEN 256
 #define VAR_CAP_LEN   128
 
-void slimproto(log_level level, char *server, u8_t mac[6], const char *name, const char *namefile, const char *modelname, int maxSampleRate) {
+void slimproto(log_level level, char *server, u8_t mac[6], const char *name, const char *namefile, const char *modelname, u8_t deviceid, int maxSampleRate) {
 	struct sockaddr_in serv_addr;
 	static char fixed_cap[FIXED_CAP_LEN], var_cap[VAR_CAP_LEN] = "";
 	bool reconnect = false;
@@ -875,11 +931,16 @@ void slimproto(log_level level, char *server, u8_t mac[6], const char *name, con
 	if (!running) return;
 
 	LOCK_O;
-	snprintf(fixed_cap, FIXED_CAP_LEN, ",ModelName=%s,MaxSampleRate=%u", modelname ? modelname : MODEL_NAME_STRING,
+	snprintf(fixed_cap, FIXED_CAP_LEN, ",ModelName=%s,MaxSampleRate=%u,HasPreAmp=%d", modelname ? modelname : MODEL_NAME_STRING,
 #if RESAMPLE
-			 ((maxSampleRate > 0) ? maxSampleRate : output.supported_rates[0]));
+			 ((maxSampleRate > 0) ? maxSampleRate : output.supported_rates[0]),
 #else
-			 ((maxSampleRate > 0 && maxSampleRate < output.supported_rates[0]) ? maxSampleRate : output.supported_rates[0]));
+			 ((maxSampleRate > 0 && maxSampleRate < output.supported_rates[0]) ? maxSampleRate : output.supported_rates[0]),
+#endif
+#if HDMICEC
+			 ((cec_opts.enabled) ? 1: 0));
+#else
+			 0);
 #endif
 	
 	for (i = 0; i < MAX_CODECS; i++) {
@@ -895,6 +956,14 @@ void slimproto(log_level level, char *server, u8_t mac[6], const char *name, con
 	serv_addr.sin_addr.s_addr = slimproto_ip;
 	serv_addr.sin_port = htons(slimproto_port);
 
+#if HDMICEC
+	LOCK_SQ;
+	sq.server_ip = slimproto_ip;
+	sprintf(sq.client_id, "%02x:%02x:%02x:%02x:%02x:%02x",
+				mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	UNLOCK_SQ;
+#endif
+
 	LOG_INFO("connecting to %s:%d", inet_ntoa(serv_addr.sin_addr), ntohs(serv_addr.sin_port));
 
 	new_server = 0;
@@ -904,6 +973,11 @@ void slimproto(log_level level, char *server, u8_t mac[6], const char *name, con
 		if (new_server) {
 			previous_server = slimproto_ip;
 			slimproto_ip = serv_addr.sin_addr.s_addr = new_server;
+#if HDMICEC
+			LOCK_SQ;
+			sq.server_ip = slimproto_ip;
+			UNLOCK_SQ;
+#endif
 			LOG_INFO("switching server to %s:%d", inet_ntoa(serv_addr.sin_addr), ntohs(serv_addr.sin_port));
 			new_server = 0;
 			reconnect = false;
@@ -927,6 +1001,11 @@ void slimproto(log_level level, char *server, u8_t mac[6], const char *name, con
 			// rediscover server if it was not set at startup
 			if (!server && ++failed_connect > 5) {
 				slimproto_ip = serv_addr.sin_addr.s_addr = discover_server(NULL);
+#if HDMICEC
+				LOCK_SQ;
+				sq.server_ip = slimproto_ip;
+				UNLOCK_SQ;
+#endif
 			}
 
 		} else {
@@ -956,7 +1035,7 @@ void slimproto(log_level level, char *server, u8_t mac[6], const char *name, con
 				new_server_cap = NULL;
 			}
 
-			sendHELO(reconnect, fixed_cap, var_cap, mac);
+			sendHELO(reconnect, fixed_cap, var_cap, deviceid, mac);
 
 			slimproto_run();
 

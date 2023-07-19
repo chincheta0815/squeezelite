@@ -140,11 +140,23 @@ struct audg_packet {
 	u32_t old_gainL;     // unused
 	u32_t old_gainR;     // unused
 	u8_t  adjust;
-	u8_t  preamp;        // unused
+	u8_t  preamp;
 	u32_t gainL;
 	u32_t gainR;
 	// squence ids - unused
 };
+
+#if HDMICEC
+struct audm_packet {
+	char opcode[4];
+	u8_t state;
+};
+
+struct audf_packet {
+	char opcode[4];
+	u8_t active;
+};
+#endif
 
 // S:P:Squeezebox2
 struct cont_packet {
