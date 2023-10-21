@@ -681,15 +681,14 @@ int sq_callback(sq_event_t event, ...) {
 			int mute = va_arg(args, int);
 
 			LOG_DEBUG("SQ: received SQ_MUTE_TOGGLE (%d)", mute);
-			u32_t now = gettime_ms();
 
-			if (mute && now > cec.volume_stamp_tx + 1000) {
+			if (mute) {
 				cec_req_t *req = malloc(sizeof(cec_req_t));
 				strcpy(req->type, "SET_MUTE");
 				cec_queue_insert(&cec.queue, req);
 				CONDSIGNAL_SQ;
 			}
-			else if (!mute && now > cec.volume_stamp_tx + 1000) {
+			else if (!mute) {
 				cec_req_t *req = malloc(sizeof(cec_req_t));
  				strcpy(req->type, "SET_UNMUTE");
 				cec_queue_insert(&cec.queue, req);
@@ -711,6 +710,20 @@ int sq_callback(sq_event_t event, ...) {
 			u32_t now = gettime_ms();
 
 			u8_t volume = map_dB_to_volume(dB);
+
+			/*
+			 * this is just a hack. can be removed once mute is 
+			 * initialized correctly ...
+			 */
+			if (cec.sq_mute == UNKNOWN) {
+				LOG_DEBUG("SQ: initializing MUTE state");
+				if (volume > 0) {
+					cec.sq_mute = UNMUTED;
+				}
+				else {
+					cec.sq_mute = MUTED;
+				}
+			}
 
 			if (cec.sq_volume == CEC_AUDIO_VOLUME_STATUS_UNKNOWN ||
 				volume != cec.sq_volume
@@ -801,7 +814,7 @@ void *request_thread() {
 					cec.sq_mute = MUTED;
 
 					if ((cec.device_volume & CEC_AUDIO_MUTE_STATUS_MASK) != CEC_AUDIO_MUTE_STATUS_MASK
-						|| !cec.device_mute) {
+						|| cec.device_mute == UNMUTED) {
 						LOG_DEBUG("SQ >> CEC: cec.sq_mute (%d), cec.device_mute (%d). muting CEC device",
 								cec.sq_mute, cec.device_mute);
 						CEC(i, mute_audio, cec.connection, true);
@@ -816,7 +829,7 @@ void *request_thread() {
 					cec.sq_mute = UNMUTED;
 
 					if ((cec.device_volume & CEC_AUDIO_MUTE_STATUS_MASK) == CEC_AUDIO_MUTE_STATUS_MASK
-						|| cec.device_mute) {
+						|| cec.device_mute == MUTED) {
 						LOG_DEBUG("SQ >> CEC: cec.sq_mute (%d), cec.device_mute (%d). unmuting CEC device",
 								cec.sq_mute, cec.device_mute);
 						CEC(i, mute_audio, cec.connection, true);
@@ -839,7 +852,6 @@ void *request_thread() {
 					/*
 					 * if everything is muted there is no delta between the volumes.
 					 * so do not set the volume - this would unmute the CEC device.
-					 *
 					 */
 					if (((cec.device_volume & CEC_AUDIO_MUTE_STATUS_MASK) == CEC_AUDIO_MUTE_STATUS_MASK || cec.device_mute == MUTED)
 						&& cec.sq_mute)
@@ -923,22 +935,33 @@ static void *cec_thread() {
 		if (!cec.device_not_active && cec.device_audio_mode == CEC_SYSTEM_AUDIO_STATUS_ON) {
 			u32_t now = gettime_ms();
 			cec.device_volume = CEC(i, audio_get_status, cec.connection);
-			//LOG_DEBUG("CEC >> SQ: audio_status is %02x (%d)", cec.device_volume, cec.device_volume);
-
-			// does volume change unmute or is specific unmute needed?
-			if (((cec.device_volume & CEC_AUDIO_MUTE_STATUS_MASK) != CEC_AUDIO_MUTE_STATUS_MASK || cec.device_volume > 0)
-				&& (cec.device_volume & ~CEC_AUDIO_MUTE_STATUS_MASK) != cec.sq_volume && now > cec.volume_stamp_tx + 1000) {
-				LOG_DEBUG("CEC >> SQ: cec.sq_volume: %d (mute: %d), cec.device_volume: %d (mute: %d)",
-						cec.sq_volume, cec.sq_mute, cec.device_volume, cec.device_mute); 
-				LOG_DEBUG("CEC >> SQ: send volume update");
-				cec.volume_stamp_tx = now;
-				//sq_notify(SQ_VOLUME, cec.device_volume);
+			if ((cec.device_volume & CEC_AUDIO_MUTE_STATUS_MASK) != CEC_AUDIO_MUTE_STATUS_MASK) {
+				cec.device_mute = UNMUTED;
 			}
-			else if (((cec.device_volume & CEC_AUDIO_MUTE_STATUS_MASK) == CEC_AUDIO_MUTE_STATUS_MASK || cec.device_volume == 0)
-				&& now > cec.volume_stamp_tx + 1000) {
-				LOG_DEBUG("CEC >> SQ: send mute update");
-				cec.volume_stamp_tx = now;
-				//sq_notify(SQ_MUTE);
+			else if((cec.device_volume & CEC_AUDIO_MUTE_STATUS_MASK) == CEC_AUDIO_MUTE_STATUS_MASK) {
+				cec.device_mute = MUTED;
+			}
+			cec.device_volume &= ~CEC_AUDIO_MUTE_STATUS_MASK;
+
+			LOG_DEBUG("CEC >> SQ: cec.sq_volume: %d (mute: %d), cec.device_volume: %d (mute: %d)",
+				cec.sq_volume, cec.sq_mute, cec.device_volume, cec.device_mute);
+
+			if (cec.device_mute == UNMUTED) {
+				if (cec.sq_mute == MUTED) {
+					LOG_DEBUG("CEC >> SQ: send unmute");
+					sq_notify(SQ_UNMUTE);
+				}
+				if ((cec.device_volume & ~CEC_AUDIO_MUTE_STATUS_MASK) != cec.sq_volume) {
+					LOG_DEBUG("CEC >> SQ: send volume update");
+					cec.volume_stamp_tx = now;
+					sq_notify(SQ_VOLUME, (cec.device_volume & ~CEC_AUDIO_MUTE_STATUS_MASK));
+				}
+			}
+			else if (cec.device_mute == MUTED) {
+				if (cec.sq_mute == UNMUTED) {
+					LOG_DEBUG("CEC >> SQ: send mute");
+					sq_notify(SQ_MUTE);
+				}
 			}
 		}
 
